@@ -44,7 +44,11 @@ def _load():
         return _TOKENIZER, _MODEL, _DEVICE
     from transformers import AutoTokenizer, AutoModel
     _DEVICE = get_device()
-    print(f"[bert_features] loading {BERT_MODEL_NAME} on {_DEVICE} ...")
+    print(
+        f"[bert_features] loading {BERT_MODEL_NAME} on {_DEVICE} "
+        f"(torch={torch.__version__}, cuda_available={torch.cuda.is_available()}, "
+        f"cuda_version={torch.version.cuda or 'none'}) ..."
+    )
     _TOKENIZER = AutoTokenizer.from_pretrained(BERT_MODEL_NAME)
     _MODEL = AutoModel.from_pretrained(BERT_MODEL_NAME)
     _MODEL.eval()
