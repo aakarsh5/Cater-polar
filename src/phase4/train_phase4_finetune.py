@@ -101,6 +101,8 @@ class CoTFineTuneDataset(Dataset):
         self.input_ids      = enc["input_ids"].long()
         self.attention_mask = enc["attention_mask"].long()
         self.labels         = torch.tensor(labels, dtype=torch.long)
+        self.texts          = texts
+        self.label_texts    = df["binary_label"].astype(str).tolist()
 
         # Subword-aligned concept masks via the same subword_to_word index used
         # by the frozen pipeline. We DON'T need the cached features themselves.
@@ -145,8 +147,8 @@ class CoTFineTuneDataset(Dataset):
         )
         if self.meta is not None:
             hm = self.has_meta[i] if self.has_meta is not None else torch.tensor(1.0)
-            return base + (self.meta[i], hm)
-        return base
+            return base + (self.meta[i], hm, self.texts[i], self.label_texts[i])
+        return base + (self.texts[i], self.label_texts[i])
 
 
 # ---------------------------------------------------------------------------
@@ -194,11 +196,11 @@ def gated_aux_loss(aux_logits, targets, mask, weight=None):
 # ---------------------------------------------------------------------------
 def _unpack(batch, use_meta, device):
     if use_meta:
-        ids, amask, em, mo, ne, y, meta, has_meta = batch
+        ids, amask, em, mo, ne, y, meta, has_meta = batch[:8]
         return (ids.to(device), amask.to(device),
                 em.to(device), mo.to(device), ne.to(device),
                 y.to(device), meta.to(device), has_meta.to(device))
-    ids, amask, em, mo, ne, y = batch
+    ids, amask, em, mo, ne, y = batch[:6]
     return (ids.to(device), amask.to(device),
             em.to(device), mo.to(device), ne.to(device),
             y.to(device), None, None)
@@ -282,13 +284,14 @@ def main(
     dropout: float = 0.2,
     dataset: str = "liar",
     balance: bool = False,
+    device_mode: str = "auto",
 ):
     torch.manual_seed(seed); np.random.seed(seed)
-    device = get_device()
+    device = get_device(device_mode)
     print(
         f"\nPhase 4 FINE-TUNE training "
         f"(dataset={dataset}, L={L}, unfreeze_top_n={unfreeze_top_n}, "
-        f"meta={use_meta}, seed={seed}, device={device})"
+        f"meta={use_meta}, seed={seed}, device={device}, device_mode={device_mode})"
     )
 
     from transformers import AutoTokenizer
@@ -414,7 +417,7 @@ def main(
         ])
 
     LAMBDA_AUX = CONCEPT_AUX_LAMBDA
-    LAMBDA_COV = 0.05
+    LAMBDA_COV = 0.1
     best_f1, best_state, patience = -1.0, None, 0
 
     for epoch in range(1, epochs + 1):
@@ -517,7 +520,7 @@ def main(
     os.makedirs(rat_dir, exist_ok=True)
     out_path = os.path.join(rat_dir, f"sample_{tag}.txt")
     model.eval()
-    with torch.no_grad(), open(out_path, "w") as fout:
+    with torch.no_grad(), open(out_path, "w", encoding="utf-8") as fout:
         n_written = 0
         for batch in test_loader:
             ids, amask, em_m, mo_m, ne_m, y, meta, has_meta = _unpack(batch, use_meta, device)
@@ -528,6 +531,12 @@ def main(
              em_alpha, mo_alpha, ne_alpha,
              _) = out
             B = ids.size(0)
+            if use_meta:
+                texts = batch[8]
+                actual_labels = batch[9]
+            else:
+                texts = batch[6]
+                actual_labels = batch[7]
             for i in range(B):
                 if n_written >= 12:
                     break
@@ -539,7 +548,10 @@ def main(
                     em_m[i], mo_m[i], ne_m[i],
                     top_k=5,
                 )
-                fout.write(f"--- example {n_written + 1} (gold={y[i].item()}) ---\n")
+                fout.write(f"--- example {n_written + 1} ---\n")
+                fout.write(f"Input: {texts[i]}\n")
+                fout.write(f"Actual label: {actual_labels[i]}\n")
+                fout.write(f"Gold index: {y[i].item()}\n")
                 fout.write(rationale + "\n\n")
                 n_written += 1
             if n_written >= 12:
@@ -595,6 +607,10 @@ if __name__ == "__main__":
         help="Use domain-balanced sampler (LIAR/CoAID x fake/real). "
              "Recommended with --dataset merged.",
     )
+    p.add_argument(
+        "--device", choices=["auto", "cuda", "gpu", "mps", "cpu"], default="auto",
+        help="Select the runtime device. Use cuda/gpu to require a CUDA-enabled PyTorch build.",
+    )
     args = p.parse_args()
     main(
         L=args.L,
@@ -609,4 +625,5 @@ if __name__ == "__main__":
         dropout=args.dropout,
         dataset=args.dataset,
         balance=args.balance,
+        device_mode=args.device,
     )
