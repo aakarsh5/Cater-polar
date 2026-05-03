@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="520" viewBox="0 0 1000 520">
+  <style>
+    .box{fill:#f7f9fc;stroke:#2b6cb0;stroke-width:2;rx:8;}
+    .small{font:14px sans-serif;fill:#0b2240}
+    .title{font:16px sans-serif;fill:#06213a;font-weight:700}
+    .arrow{stroke:#2b6cb0;stroke-width:2;fill:none;marker-end:url(#arrowhead)}
+    .label{font:12px sans-serif;fill:#08304a}
+  </style>
+
+  <defs>
+    <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#2b6cb0" />
+    </marker>
+  </defs>
+
+  <!-- Phase boxes -->
+  <rect x="40" y="30" width="180" height="80" class="box" rx="8"/>
+  <text x="130" y="55" text-anchor="middle" class="title">Phase 1</text>
+  <text x="130" y="75" text-anchor="middle" class="small">Clean → Tokenize → Concept Map</text>
+
+  <rect x="260" y="30" width="220" height="80" class="box" rx="8"/>
+  <text x="370" y="55" text-anchor="middle" class="title">Phase 2</text>
+  <text x="370" y="75" text-anchor="middle" class="small">DistilBERT → last_hidden_state</text>
+  <text x="370" y="92" text-anchor="middle" class="small">+ subword_to_word alignment</text>
+
+  <rect x="520" y="30" width="220" height="80" class="box" rx="8"/>
+  <text x="630" y="55" text-anchor="middle" class="title">Phase 3</text>
+  <text x="630" y="75" text-anchor="middle" class="small">BiLSTM + Multi-head Attention</text>
+  <text x="630" y="92" text-anchor="middle" class="small">→ pooled representation</text>
+
+  <rect x="760" y="30" width="180" height="80" class="box" rx="8"/>
+  <text x="850" y="55" text-anchor="middle" class="title">Phase 4</text>
+  <text x="850" y="75" text-anchor="middle" class="small">CoT: Emotion / Modality / Negation</text>
+  <text x="850" y="92" text-anchor="middle" class="small">→ Fusion → Classifier + Rationales</text>
+
+  <!-- Arrows between phases -->
+  <path d="M220 70 L260 70" class="arrow"/>
+  <path d="M480 70 L520 70" class="arrow"/>
+  <path d="M740 70 L760 70" class="arrow"/>
+
+  <!-- Side inputs: concept masks and alignment -->
+  <rect x="40" y="150" width="260" height="74" class="box" rx="8"/>
+  <text x="170" y="175" text-anchor="middle" class="title">Concept Masks</text>
+  <text x="170" y="195" text-anchor="middle" class="small">(Emotion / Modality / Negation)</text>
+  <path d="M170 224 L170 260" class="arrow"/>
+  <path d="M170 260 L520 260" class="arrow"/>
+  <text x="350" y="252" class="label">aligned →</text>
+
+  <rect x="40" y="260" width="260" height="64" class="box" rx="8"/>
+  <text x="170" y="285" text-anchor="middle" class="title">Subword → Word</text>
+  <text x="170" y="305" text-anchor="middle" class="small">alignment (Phase 2)</text>
+  <path d="M300 292 L520 150" class="arrow"/>
+  <text x="420" y="220" class="label">used by Phase 4 to map</text>
+  <text x="420" y="236" class="label">attentions back to words</text>
+
+  <!-- Concept heads detail -->
+  <g transform="translate(560,160)">
+    <rect x="0" y="0" width="360" height="200" class="box" rx="8"/>
+    <text x="180" y="20" text-anchor="middle" class="title">Phase 4 CoT Head</text>
+    <text x="180" y="42" text-anchor="middle" class="small">three parallel ConceptHeads</text>
+
+    <rect x="20" y="60" width="100" height="36" class="box"/>
+    <text x="70" y="84" text-anchor="middle" class="small">Emotion</text>
+    <rect x="130" y="60" width="100" height="36" class="box"/>
+    <text x="180" y="84" text-anchor="middle" class="small">Modality</text>
+    <rect x="240" y="60" width="100" height="36" class="box"/>
+    <text x="290" y="84" text-anchor="middle" class="small">Negation</text>
+
+    <path d="M120 96 L180 140" class="arrow"/>
+    <path d="M240 96 L180 140" class="arrow"/>
+    <rect x="150" y="140" width="120" height="36" class="box"/>
+    <text x="210" y="162" text-anchor="middle" class="small">Fusion & Gates</text>
+    <path d="M210 176 L210 210" class="arrow"/>
+    <rect x="150" y="210" width="120" height="36" class="box"/>
+    <text x="210" y="232" text-anchor="middle" class="small">Classifier → logits</text>
+    <path d="M210 246 L210 270" class="arrow"/>
+    <rect x="150" y="270" width="120" height="36" class="box"/>
+    <text x="210" y="292" text-anchor="middle" class="small">Rationales (text dump)</text>
+  </g>
+
+  <!-- Outputs -->
+  <rect x="40" y="420" width="300" height="64" class="box" rx="8"/>
+  <text x="190" y="445" text-anchor="middle" class="title">Outputs</text>
+  <text x="190" y="463" text-anchor="middle" class="small">models/  results/  logs/rationales_phase4*</text>
+  <path d="M270 420 L520 110" class="arrow"/>
+
+  <!-- Footer caption -->
+  <text x="520" y="500" class="small">Diagram: Data flow from Phase 1 → Phase 4 (CoT) with alignment and concept masks feeding the concept heads.</text>
+</svg>

@@ -108,13 +108,23 @@ Reasonveritas/
 │   └── bert_features_merged_{train,val,test}_L128.npz  # joint BERT cache
 ├── models/                    # Saved checkpoints (best val macro-F1)
 │   ├── phase3_L128_best.pt, phase3_finetune_L128_uf2_best.pt
-│   └── phase4_L128_best.pt,  phase4_finetune_L128_uf2_best.pt
+│   ├── phase4_L128_best.pt,  phase4_finetune_L128_uf2_best.pt
+│   └── baselines/             # serialized classical baseline models (pkl)
 ├── results/                   # Final test JSONs / CSV summaries (one per run)
 ├── logs/                      # CSV training logs + rationale dumps
+├── docs/                      # auxiliary docs and diagrams (architecture SVG)
+├── PHASE4_CHANGE_HISTORY.md    # change log for Phase 4 development
+├── RESULTS_LOG.md              # index of saved results and models
 └── src/
     ├── config.py              # Paths, BERT_MODEL_NAME, sequence lengths
     ├── meta_encoder.py        # Party + credit + speaker/subject/context embeddings
     ├── utils_logger.py
+  ├── baselines/             # classical baselines (logreg, svm, multinomial_nb)
+  │   ├── __init__.py
+  │   ├── train_text_baselines.py
+  │   ├── logistic_regression_baseline.py
+  │   ├── linear_svm_baseline.py
+  │   └── multinomial_nb_baseline.py
     ├── phase1/                # Dataset + preprocessing (steps 1–8)
     │   ├── prepare_coaid.py        # Self-contained CoAID Phase 1 pipeline
     │   └── merge_datasets.py       # Build LIAR + CoAID joint splits
@@ -133,9 +143,13 @@ Reasonveritas/
         ├── cot_finetune.py            # CoTModelFineTune (end-to-end DistilBERT)
         ├── train_phase4_finetune.py   # fine-tune trainer + attention rationales
         └── rationale.py               # template + attention-grounded rationale generators
-```
+      ```
 
----
+      ## Architecture diagram
+
+      ![Model architecture](docs/architecture_diagram.svg)
+
+      ---
 
 ## Prerequisites
 
@@ -543,3 +557,100 @@ Key references:
 - Howard, J. & Ruder, S. (2018). _Universal Language Model Fine-tuning for Text Classification._ ACL. (ULMFiT-style two-group LR.)
 - Sun, C. et al. (2019). _How to Fine-Tune BERT for Text Classification?_ CCL.
 - Sanh, V. et al. (2019). _DistilBERT, a distilled version of BERT._ NeurIPS EMC^2 Workshop.
+
+## Chain-of-Thought (CoT) details and data flow
+
+This section explains how data flows through the four phases and how the Phase 4 Chain-of-Thought (CoT) reasoning head is computed and rendered into human-readable rationales.
+
+### High-level data flow
+
+- Raw inputs: LIAR TSVs + (optional) CoAID CSVs → `src/phase1/*` preprocessing.
+- Tokenization & truncation: `phase1/step3_tokenize.py` → `phase1/step4_sequence_length.py` produces `liar_truncated_L{L}.csv` and CoAID equivalents.
+- Concept mapping: `phase1/step6_concept_mapping.py` tags every whitespace token with lexicon-derived concept indicators (Emotion, Modality, Negation) and writes `liar_concepts_step6_L{L}.csv` and `coaid_concepts_step6_L{L}.csv`.
+- Merge (optional): `phase1/merge_datasets.py` builds `merged_{train,val,test}_split_L{L}.csv` combining LIAR + CoAID with `dataset_source` and `has_meta` columns.
+- Feature caching: `phase2/step3_embeddings.py` runs `distilbert-base-uncased` over tokenized inputs and writes `bert_features_{*}_L{L}.npz` plus `subword_to_word` alignment arrays; these caches decouple expensive transformer passes from training loops.
+- Model training: Phase 3 consumes BERT caches (or runs live for fine-tune) and trains a BiLSTM-Attention classifier. Phase 4 attaches 3 concept-gated attention heads and auxiliary losses; fine-tune variants optionally unfreeze the top-N transformer blocks and train end-to-end.
+
+### Where to find artifacts (quick)
+
+- Preprocessed CSVs: `data/liar_*`, `data/merged_*`
+- BERT features and alignment: `data/bert_features*`, `data/subword_to_word*`
+- Concept masks (word-level): `data/liar_concepts_step6_L{L}.csv`, `data/concept_masks_*.npz`
+- Models & results: `models/` and `results/`
+- Rationale text dumps (human-readable CoT): `logs/rationales_phase4*/*.txt`
+
+### Phase 4 — CoT computation (conceptual)
+
+Phase 4 implements an interpretable Chain-of-Thought head made of three concept channels: Emotion, Modality, and Negation. The implementation files are in `src/phase4/` (`cot_model.py`, `cot_finetune.py`, `rationale.py`, `train_phase4*.py`). The computation proceeds as follows for a single example:
+
+1. Backbone encoding
+  - Input tokens are mapped (via `subword_to_word`) to DistilBERT subword tokens and encoded into `last_hidden_state` vectors (shape B×T×H). For frozen runs we load these from `bert_features_*.npz`; for fine-tune runs we compute them on the fly.
+
+2. Sequential encoder & attention
+  - `BiLSTM` (Phase 3 backbone) runs over the BERT token vectors producing contextualized token outputs. A multi-head self-attention layer refines per-token importance signals.
+
+3. Concept heads (Emotion / Modality / Negation)
+  - Each concept head is an attention module over the token sequence that produces:
+    - a per-token attention distribution α_concept (summing to 1 across tokens), and
+    - a scalar concept score s_concept ∈ [0,1] obtained by pooling the attended token features followed by a small MLP + sigmoid.
+  - Concept heads are trained with an auxiliary binary loss (when lexicon-derived concept labels exist) to encourage agreement between the head score and the lexicon presence of that concept in the ground-truth sentence. The auxiliary weight is `CONCEPT_AUX_LAMBDA` in `src/config.py`.
+
+4. Coverage penalty and sparsity
+  - During training we optionally apply a coverage penalty (hyperparameter `COVERAGE_PENALTY_LAMBDA`) that discourages diffuse attention across concepts and encourages concise token-level explanations. See `train_phase4*.py` for the exact term added to the loss.
+
+5. Gating & fusion
+  - The three concept head outputs are fused into the final classification in two ways:
+    - Concatenation: pooled backbone representation + three concept scores → classifier MLP.
+    - Gated modulation: learned scalar gates allow concept scores to modulate the classifier logits (helps the model rely more or less on CoT signals per-example).
+  - The fusion weights and gates are learned end-to-end with the main classification objective.
+
+6. Final label & confidence
+  - The classifier outputs softmax logits; the `Verdict` is the argmax label and `Confidence` is the top softmax probability. These are saved to the JSON test report alongside per-concept scores and top contributing tokens.
+
+### Rationale formatting (human readable)
+
+Rationale files (examples in `logs/rationales_phase4_finetune/`) are generated by `src/phase4/rationale.py`. For each example the file contains:
+
+- The original `Input` and normalized `Statement` text.
+- `Actual label` (gold) and `Verdict` (model). `Confidence` is the model's top probability.
+- For each concept head, a line showing `score` → a categorical label (low/medium/high) computed by thresholds (configurable) plus a short English hint (e.g. “heavy hedging”, “strong negation”).
+- `Top tokens:` — token snippets with their α weights (how much that token contributed to the concept score). These are produced by mapping the per-subword attention back to whitespace words using the `subword_to_word` alignment and summing α across subwords.
+
+Example snippet (already in `logs/rationales_phase4_finetune/sample_phase4_finetune_merged_L128_uf2.txt`):
+
+```
+Step 1 [Emotion]:   score 0.00 → low     — minimal emotional language — claim is relatively neutral
+        Top tokens: (no concept tokens in this example)
+Step 2 [Modality]:  score 0.79 → HIGH    — heavy use of hedging words (may/might/could)
+        Top tokens: "what" (α=0.72), "call" (α=0.18)
+Step 3 [Negation]:  score 0.00 → low     — little to no negation
+```
+
+### Key knobs (config names)
+
+- `CONCEPT_AUX_LAMBDA` — weight for auxiliary concept classification losses.
+- `COVERAGE_PENALTY_LAMBDA` — weight for the attention coverage penalty (reduces redundant attention spread).
+- `UNFREEZE_N` / CLI `--unfreeze N` — number of DistilBERT transformer blocks to unfreeze for fine-tuning.
+- `--dataset {liar,coaid,merged}` — choose which dataset split to train on.
+- `--balance` — domain-balanced sampler when using `merged` dataset.
+
+### Quick inference / rationale export
+
+To run inference and dump rationales for a saved checkpoint:
+
+```bash
+python src/phase4/train_phase4_finetune.py \
+  --L 128 --dataset merged --unfreeze 2 --seed 42 \
+  --mode evaluate --checkpoint models/phase4_finetune_merged_L128_uf2_best.pt \
+  --rationale_out logs/rationales_phase4_finetune/sample_phase4_finetune_merged_L128_uf2.txt
+```
+
+This will write per-example CoT explanations alongside the JSON test report in `results/`.
+
+---
+
+If you'd like, I can also:
+
+- Commit this README change and push it to `origin/main` now.
+- Add a small diagram image (SVG) showing the phase-by-phase data flow and call it from the README.
+
