@@ -1,37 +1,83 @@
 # Cater-polar / ReasonVeritas
 
 **Confidence-Calibrated Chain-of-Thought Reasoning for Interpretable and Reliable Deep Learning Models**
-*(LIAR dataset for fake-news / claim prediction)*
+_(LIAR dataset for fake-news / claim prediction)_
 
 ---
 
 ## Overview
 
-ReasonVeritas is a four-phase pipeline for interpretable, confidence-aware fake-news classification on the LIAR dataset. The pipeline cleans and tokenizes the corpus, encodes it with DistilBERT, runs a strong BiLSTM-Attention baseline, and finally adds a Chain-of-Thought (CoT) reasoning head with three concept-gated attention channels (Emotion, Modality, Negation) and faithful, attention-grounded rationales.
+ReasonVeritas is a four-phase pipeline for interpretable, confidence-aware fake-news classification on the LIAR dataset. It cleans and tokenizes the text, caches DistilBERT features, trains a strong BiLSTM-Attention baseline, and then adds a Chain-of-Thought (CoT) reasoning head with three concept-gated attention channels: Emotion, Modality, and Negation.
 
-| Phase | Purpose |
-|---|---|
-| **Phase 1** | Clean → normalize → tokenize → truncate (L=128) → class balance → concept mapping → stratified splits → eval variants. |
-| **Phase 2** | Reasoning-unit retokenization (legacy) → vocabulary encoding (legacy) → **DistilBERT contextual feature caching + subword↔word alignment** (current). |
+If you only need the headline numbers, check [RESULTS_LOG.md](RESULTS_LOG.md) for the saved result locations and the table below for the current best scores.
+
+## Start Here
+
+If you want the shortest path to a usable run, start with the best model and the three baselines already tracked in this repo.
+
+- Best overall model: Phase 4 fine-tune with `--unfreeze 2`
+- Best classical baseline: Multinomial Naive Bayes
+- All saved outputs: [RESULTS_LOG.md](RESULTS_LOG.md)
+
+## Current Results Snapshot
+
+| Model                             | Test Macro-F1 | Test Accuracy | Saved Result                                                                                               |
+| --------------------------------- | ------------: | ------------: | ---------------------------------------------------------------------------------------------------------- |
+| Phase 4 fine-tune, `--unfreeze 2` |    **0.7145** |    **0.7214** | [results/phase4_finetune_merged_L128_uf2_seed42.json](results/phase4_finetune_merged_L128_uf2_seed42.json) |
+| Phase 4 fine-tune, `--unfreeze 4` |        0.7135 |        0.7178 | [results/phase4_finetune_merged_L128_uf4_seed42.json](results/phase4_finetune_merged_L128_uf4_seed42.json) |
+| Logistic Regression baseline      |        0.6711 |        0.6823 | [results/logreg_baseline_merged_L128.json](results/logreg_baseline_merged_L128.json)                       |
+| Linear SVM baseline               |        0.6618 |        0.6797 | [results/linear_svm_baseline_merged_L128.json](results/linear_svm_baseline_merged_L128.json)               |
+| Multinomial NB baseline           |        0.6754 |        0.6902 | [results/multinomial_nb_baseline_merged_L128.json](results/multinomial_nb_baseline_merged_L128.json)       |
+
+Best checkpoint and rationale sample for the strongest model:
+
+- [models/phase4_finetune_merged_L128_uf2_best.pt](models/phase4_finetune_merged_L128_uf2_best.pt)
+- [logs/rationales_phase4_finetune/sample_phase4_finetune_merged_L128_uf2.txt](logs/rationales_phase4_finetune/sample_phase4_finetune_merged_L128_uf2.txt)
+
+For paper comparison, the strongest classical baseline is Multinomial NB, while the best overall model is the Phase 4 fine-tuned `--unfreeze 2` configuration.
+
+| Phase       | Purpose                                                                                                                                                                                                         |
+| ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Phase 1** | Clean → normalize → tokenize → truncate (L=128) → class balance → concept mapping → stratified splits → eval variants.                                                                                          |
+| **Phase 2** | Reasoning-unit retokenization (legacy) → vocabulary encoding (legacy) → **DistilBERT contextual feature caching + subword↔word alignment** (current).                                                           |
 | **Phase 3** | BiLSTM + multi-head self-attention classifier with optional metadata (party + credit-history + speaker/subject/context embeddings). Two variants: **frozen** features and **end-to-end fine-tuned** DistilBERT. |
-| **Phase 4** | Chain-of-Thought head: 3 concept-gated attention heads + auxiliary multi-task losses + attention-grounded rationales. Same two variants (frozen / fine-tuned). |
+| **Phase 4** | Chain-of-Thought head: 3 concept-gated attention heads + auxiliary multi-task losses + attention-grounded rationales. Same two variants (frozen / fine-tuned).                                                  |
 
 All pipeline outputs are written to `data/`. Paths and constants are centralized in `src/config.py`.
 
 ---
 
-## What's changed since the previous README
+## Key Highlights
 
-The earlier README only documented Phase 1 and Phase 2. This version adds Phase 3 and Phase 4 plus several substantial changes to the upstream phases:
+This version expands the original README into a full project guide. The main additions are:
 
-- **DistilBERT replaces GloVe.** Phase 2 step 3 no longer builds a static GloVe-or-random embedding matrix. It now caches `last_hidden_state` from `distilbert-base-uncased` and a `subword_to_word` alignment used by Phase 4's concept masks. The `EMBEDDING_DIM` / `GLOVE_PATH` config entries are no longer used by Phase 3 or Phase 4.
-- **Sequence length is standardized at L=128.** L=256 and L=512 still build, but all reported numbers and run commands use L=128.
-- **Metadata encoder.** `src/meta_encoder.py` adds party (one-hot), credit-history counts (5 numeric, scaled), and learnable embeddings for speaker / subject / context (Karimi & Tang 2019). Wired into both Phase 3 and Phase 4 backbones.
-- **Phase 3 added.** BiLSTM + 4-head self-attention + mean+max pooling classifier. See "Phase 3" below for the frozen and fine-tuned variants.
-- **Phase 4 added.** Same backbone with three concept-gated attention heads (Emotion / Modality+scope / Negation+scope), auxiliary multi-task losses, and template + attention-grounded rationales.
-- **Gated auxiliary loss (dead-head fix).** Each concept head's auxiliary classifier is now trained only on examples where the corresponding concept is actually present in the input. This fixed the "dead emotion head" problem (`E_mean ≈ 0.04`) we saw with flat aux loss.
-- **Attention-grounded rationales.** `src/phase4/rationale.py` now also emits the top-K subword tokens each concept head attended to, decoded via the tokenizer. Sample dump in `logs/rationales_phase4*/`.
-- **End-to-end fine-tune branch.** `train_finetune.py` (Phase 3) and `train_phase4_finetune.py` (Phase 4) unfreeze the top-N DistilBERT transformer blocks for full end-to-end training (ULMFiT-style two-group LR). See `FINETUNE_README.md` a quick start.
+- **DistilBERT replaces GloVe.** Phase 2 step 3 caches `last_hidden_state` from `distilbert-base-uncased` plus the `subword_to_word` alignment used by Phase 4.
+- **L=128 is the main comparison setting.** L=256 and L=512 still exist, but the reported paper numbers use L=128.
+- **Metadata encoder.** `src/meta_encoder.py` adds party, credit-history counts, and learned speaker / subject / context embeddings.
+- **Phase 3 and Phase 4 are included.** You now have both the frozen-feature and fine-tuned neural variants.
+- **Reasoning explanations are saved.** Phase 4 writes attention-grounded rationales so the model output is easier to inspect.
+- **Classical baselines are included.** Logistic Regression, Linear SVM, and Multinomial Naive Bayes are available for paper comparison.
+- **Best results are indexed.** See [RESULTS_LOG.md](RESULTS_LOG.md) for one place to find every saved output.
+
+## Baseline Models
+
+The repository includes three simple, paper-friendly text baselines in `src/baselines/`:
+
+1. TF-IDF + Logistic Regression
+2. TF-IDF + Linear SVM
+3. Count Vectorizer + Multinomial Naive Bayes
+
+Each baseline trains on the same `merged` LIAR + CoAID splits used by the neural models and saves a JSON/CSV pair in `results/`.
+
+Run them from the project root:
+
+```powershell
+python src/baselines/logistic_regression_baseline.py --dataset merged --L 128
+python src/baselines/linear_svm_baseline.py --dataset merged --L 128
+python src/baselines/multinomial_nb_baseline.py --dataset merged --L 128
+```
+
+If you want a single place to find every saved path, use [RESULTS_LOG.md](RESULTS_LOG.md).
 
 ---
 
@@ -63,7 +109,7 @@ Reasonveritas/
 ├── models/                    # Saved checkpoints (best val macro-F1)
 │   ├── phase3_L128_best.pt, phase3_finetune_L128_uf2_best.pt
 │   └── phase4_L128_best.pt,  phase4_finetune_L128_uf2_best.pt
-├── results/                   # Final test JSONs (one per run)
+├── results/                   # Final test JSONs / CSV summaries (one per run)
 ├── logs/                      # CSV training logs + rationale dumps
 └── src/
     ├── config.py              # Paths, BERT_MODEL_NAME, sequence lengths
@@ -118,12 +164,12 @@ python -m spacy download en_core_web_sm
 
 Edit **`src/config.py`** before the first run:
 
-| Variable | Meaning | Default |
-|----------|---------|---------|
-| `LIAR_DATASET_DIR` | Folder containing raw `train.tsv`, `valid.tsv`, `test.tsv` | (set me) |
-| `DATA_DIR` | Where pipeline outputs are saved | `<repo>/data` |
-| `BERT_MODEL_NAME` | HuggingFace model id used by Phase 2 step 3 + Phase 3/4 fine-tune | `distilbert-base-uncased` |
-| `SEQUENCE_LENGTHS` | Truncation lengths produced by Phase 1 | `[128, 256, 512]` |
+| Variable           | Meaning                                                           | Default                   |
+| ------------------ | ----------------------------------------------------------------- | ------------------------- |
+| `LIAR_DATASET_DIR` | Folder containing raw `train.tsv`, `valid.tsv`, `test.tsv`        | (set me)                  |
+| `DATA_DIR`         | Where pipeline outputs are saved                                  | `<repo>/data`             |
+| `BERT_MODEL_NAME`  | HuggingFace model id used by Phase 2 step 3 + Phase 3/4 fine-tune | `distilbert-base-uncased` |
+| `SEQUENCE_LENGTHS` | Truncation lengths produced by Phase 1                            | `[128, 256, 512]`         |
 
 > The legacy `EMBEDDING_DIM` and `GLOVE_PATH` fields are still in `config.py` but are no longer consumed by Phase 3 or Phase 4. They only affect the legacy Phase 2 step 2 vocabulary encoding, which downstream code does not import.
 
@@ -202,6 +248,7 @@ python src/phase4/train_phase4_finetune.py --L 128 --unfreeze 2 --dataset merged
 ```
 
 Outputs are tagged with the dataset:
+
 - `results/phase{3,4}_merged_L128_seed42.json`
 - `models/phase{3,4}_merged_L128_best.pt`
 - `logs/phase{3,4}_merged_L128_train.csv`
@@ -224,6 +271,7 @@ With `--balance`: `WeightedRandomSampler` weights each row by `1 / count_of_(dat
 ### `has_meta` per-row mask (no fake metadata for CoAID)
 
 LIAR rows carry speaker / party / credit-history / subject / context; CoAID rows don't. Rather than fabricate values:
+
 - `prepare_coaid.py` writes empty strings / 0 for the missing columns and tags rows `has_meta = 0`.
 - `merge_datasets.py` propagates `has_meta` per row (1 = LIAR, 0 = CoAID).
 - `MetaEncoder.fit_metadata()` only fits the speaker/subject/context vocabs and the credit scaler on `has_meta == 1` rows so CoAID's empties can't poison vocab top-K.
@@ -260,10 +308,10 @@ print(f'macro_f1 = {s.mean(fs):.4f} ± {s.stdev(fs):.4f}  (n={len(fs)})')
 
 ### Recommended ablation table for the paper
 
-| Run | Frozen LIAR-only | Frozen merged + balance | Fine-tuned LIAR-only | Fine-tuned merged + balance |
-|---|---|---|---|---|
-| Phase 3 | `--L 128` | `--L 128 --dataset merged --balance` | `--L 128 --unfreeze 2` | `--L 128 --unfreeze 2 --dataset merged --balance` |
-| Phase 4 | `--L 128` | `--L 128 --dataset merged --balance` | `--L 128 --unfreeze 2` | `--L 128 --unfreeze 2 --dataset merged --balance` |
+| Run     | Frozen LIAR-only | Frozen merged + balance              | Fine-tuned LIAR-only   | Fine-tuned merged + balance                       |
+| ------- | ---------------- | ------------------------------------ | ---------------------- | ------------------------------------------------- |
+| Phase 3 | `--L 128`        | `--L 128 --dataset merged --balance` | `--L 128 --unfreeze 2` | `--L 128 --unfreeze 2 --dataset merged --balance` |
+| Phase 4 | `--L 128`        | `--L 128 --dataset merged --balance` | `--L 128 --unfreeze 2` | `--L 128 --unfreeze 2 --dataset merged --balance` |
 
 Each row × 3 seeds = 12 runs per phase. Report mean ± std and per-domain breakdown.
 
@@ -279,16 +327,16 @@ For end-to-end DistilBERT fine-tuning (≥16 GB), see **Phase 3 — Fine-tuned v
 
 ## Phase 1 — Step Details
 
-| Step | Script | Output | What it does |
-|------|--------|--------|--------------|
-| 1 | `phase1/step1_clean_liar.py` | `liar_cleaned_step1.csv` | Load LIAR TSVs, select statement + label, drop missing/duplicates, clean text (HTML, URLs→`<URL>`, numbers→`<NUM>`, ALLCAPS marker, lowercase). |
-| 2 | `phase1/step2_normalize_text.py` | `liar_normalized_step2.csv` | Unicode normalization, contractions, whitespace and punctuation normalization. |
-| 3 | `phase1/step3_tokenize.py` | `liar_tokenized_step3.csv` | Word-level tokenization (SpaCy), keep punctuation and negation. |
-| 4 | `phase1/step4_sequence_length.py` | `liar_truncated_L128.csv` (+ L256, L512) | Head truncation for ablation. All current results use L=128. |
-| 5 | `phase1/step5_class_balance.py` | `class_weights.txt` | Binary (fake/real) distribution + class weights for weighted loss. |
-| 6 | `phase1/step6_concept_mapping.py` | `liar_concepts_step6_L{L}.csv` | Lexicon-based concept tags: Emotion, Modality, Negation. Ground truth for Phase 4's concept heads — no labels are used here. |
-| 7 | `phase1/step7_dataset_split.py` | `train/val/test_split_L{L}.csv` | Stratified 70/15/15 with `random_state=42`. Same row assignment across L. |
-| 8 | `phase1/step8_evaluation_variants.py` | `train_eval_variants_step8_L{L}.csv` | Sufficiency (concept tokens only) and comprehensiveness (non-concept only) variants for faithfulness eval. |
+| Step | Script                                | Output                                   | What it does                                                                                                                                    |
+| ---- | ------------------------------------- | ---------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1    | `phase1/step1_clean_liar.py`          | `liar_cleaned_step1.csv`                 | Load LIAR TSVs, select statement + label, drop missing/duplicates, clean text (HTML, URLs→`<URL>`, numbers→`<NUM>`, ALLCAPS marker, lowercase). |
+| 2    | `phase1/step2_normalize_text.py`      | `liar_normalized_step2.csv`              | Unicode normalization, contractions, whitespace and punctuation normalization.                                                                  |
+| 3    | `phase1/step3_tokenize.py`            | `liar_tokenized_step3.csv`               | Word-level tokenization (SpaCy), keep punctuation and negation.                                                                                 |
+| 4    | `phase1/step4_sequence_length.py`     | `liar_truncated_L128.csv` (+ L256, L512) | Head truncation for ablation. All current results use L=128.                                                                                    |
+| 5    | `phase1/step5_class_balance.py`       | `class_weights.txt`                      | Binary (fake/real) distribution + class weights for weighted loss.                                                                              |
+| 6    | `phase1/step6_concept_mapping.py`     | `liar_concepts_step6_L{L}.csv`           | Lexicon-based concept tags: Emotion, Modality, Negation. Ground truth for Phase 4's concept heads — no labels are used here.                    |
+| 7    | `phase1/step7_dataset_split.py`       | `train/val/test_split_L{L}.csv`          | Stratified 70/15/15 with `random_state=42`. Same row assignment across L.                                                                       |
+| 8    | `phase1/step8_evaluation_variants.py` | `train_eval_variants_step8_L{L}.csv`     | Sufficiency (concept tokens only) and comprehensiveness (non-concept only) variants for faithfulness eval.                                      |
 
 ---
 
@@ -296,11 +344,11 @@ For end-to-end DistilBERT fine-tuning (≥16 GB), see **Phase 3 — Fine-tuned v
 
 Only **step 3** is consumed by Phase 3 and Phase 4. Steps 1 and 2 remain for the legacy GloVe-style pipeline and ablation purposes.
 
-| Step | Script | Output | What it does |
-|------|--------|--------|--------------|
-| 1 | `phase2/step1_retokenize.py` | `liar_phase2_reasoning_tokens.csv` | (Legacy) Retokenize for reasoning units. Not required by Phase 3/4. |
-| 2 | `phase2/step2_vocabulary_encoding.py` | `vocab_word2idx.json`, `encoded_L{L}.pkl` | (Legacy) Build vocabulary + integer-encode. Not required by Phase 3/4. |
-| 3 | `phase2/step3_embeddings.py` | `bert_features_{train,val,test}_L128.npz`, `subword_to_word_{train,val,test}_L128.npz` | **Cache `distilbert-base-uncased` `last_hidden_state` (B, T=128, 768) + a per-token mapping from WordPiece subwords back to whitespace word indices**, used by Phase 4 to align concept masks to subwords. |
+| Step | Script                                | Output                                                                                 | What it does                                                                                                                                                                                               |
+| ---- | ------------------------------------- | -------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1    | `phase2/step1_retokenize.py`          | `liar_phase2_reasoning_tokens.csv`                                                     | (Legacy) Retokenize for reasoning units. Not required by Phase 3/4.                                                                                                                                        |
+| 2    | `phase2/step2_vocabulary_encoding.py` | `vocab_word2idx.json`, `encoded_L{L}.pkl`                                              | (Legacy) Build vocabulary + integer-encode. Not required by Phase 3/4.                                                                                                                                     |
+| 3    | `phase2/step3_embeddings.py`          | `bert_features_{train,val,test}_L128.npz`, `subword_to_word_{train,val,test}_L128.npz` | **Cache `distilbert-base-uncased` `last_hidden_state` (B, T=128, 768) + a per-token mapping from WordPiece subwords back to whitespace word indices**, used by Phase 4 to align concept masks to subwords. |
 
 ---
 
@@ -321,7 +369,7 @@ Phase 3 trains the strong baseline: DistilBERT features → BiLSTM → multi-hea
 
 **Training (`src/phase3/train_model.py`, frozen features)**
 
-- Reads `bert_features_*_L128.npz` from disk; BERT is *not* loaded at train time.
+- Reads `bert_features_*_L128.npz` from disk; BERT is _not_ loaded at train time.
 - Smoothed cross-entropy (`smoothing=0.05`) with class weights from `class_weights.txt`.
 - AdamW, single LR group `5e-4`, cosine schedule.
 - Batch 32, ~10 epochs with early stop on val macro-F1.
@@ -345,11 +393,44 @@ Reference number: **macro-F1 ≈ 0.633** on the LIAR test split (seed 42).
 - Gradient accumulation: defaults `--batch 16 --accum 2` → effective batch 32. Drop to `--batch 8 --accum 4` if you OOM.
 
 **Run this when ram is above 32gb**
+
 ```bash
 python src/phase3/train_finetune.py --L 128 --unfreeze 2
 ```
 
 Knobs: `--unfreeze {2,4,6}` (top-N transformer blocks; 6 = full transformer), `--bert_lr`, `--head_lr`, `--batch`, `--accum`, `--epochs`, `--dropout`, `--seed`. Best checkpoint → `models/phase3_finetune_L128_uf2_best.pt`. Expected: **macro-F1 ≈ 0.66–0.69** with `--unfreeze 2`.
+
+### Classical baselines for paper comparison
+
+For a paper-ready comparison against the neural models, the repo now includes three classical baseline entry points trained on the same train/val/test splits:
+
+1. `src/baselines/logistic_regression_baseline.py` - TF-IDF + Logistic Regression
+2. `src/baselines/linear_svm_baseline.py` - TF-IDF + Linear SVM
+3. `src/baselines/multinomial_nb_baseline.py` - Count Vectorizer + Multinomial Naive Bayes
+
+Each script selects hyperparameters on validation macro-F1 and writes a result file in the same JSON/CSV style as the main models.
+
+```bash
+python src/baselines/logistic_regression_baseline.py --dataset merged --L 128
+python src/baselines/linear_svm_baseline.py --dataset merged --L 128
+python src/baselines/multinomial_nb_baseline.py --dataset merged --L 128
+```
+
+Outputs:
+
+- `results/{model}_baseline_{dataset}_L{L}.json`
+- `results/{model}_baseline_{dataset}_L{L}.csv`
+- `models/baselines/{dataset}_L{L}_{model}.pkl`
+
+Example console output:
+
+```text
+Classical baseline comparison (dataset=merged, L=128, seed=42)
+[logreg] searching validation grid ...
+  best={'C': 1.0}  val_f1=0.67xx  test_f1=0.66xx  test_acc=0.67xx
+Saved results to results/logreg_baseline_merged_L128.json
+Saved summary to results/logreg_baseline_merged_L128.csv
+```
 
 ---
 
@@ -456,8 +537,9 @@ The pipeline produces L=128, 256, and 512 truncated splits, but **all reported n
 Use and cite according to your institution's and the LIAR dataset's terms.
 
 Key references:
-- Wang, W. Y. (2017). *"Liar, Liar Pants on Fire": A New Benchmark Dataset for Fake News Detection.* ACL.
-- Karimi, H. & Tang, J. (2019). *Learning Hierarchical Discourse-level Structure for Fake News Detection.* NAACL.
-- Howard, J. & Ruder, S. (2018). *Universal Language Model Fine-tuning for Text Classification.* ACL. (ULMFiT-style two-group LR.)
-- Sun, C. et al. (2019). *How to Fine-Tune BERT for Text Classification?* CCL.
-- Sanh, V. et al. (2019). *DistilBERT, a distilled version of BERT.* NeurIPS EMC^2 Workshop.
+
+- Wang, W. Y. (2017). _"Liar, Liar Pants on Fire": A New Benchmark Dataset for Fake News Detection._ ACL.
+- Karimi, H. & Tang, J. (2019). _Learning Hierarchical Discourse-level Structure for Fake News Detection._ NAACL.
+- Howard, J. & Ruder, S. (2018). _Universal Language Model Fine-tuning for Text Classification._ ACL. (ULMFiT-style two-group LR.)
+- Sun, C. et al. (2019). _How to Fine-Tune BERT for Text Classification?_ CCL.
+- Sanh, V. et al. (2019). _DistilBERT, a distilled version of BERT._ NeurIPS EMC^2 Workshop.
