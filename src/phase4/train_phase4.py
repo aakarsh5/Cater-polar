@@ -62,14 +62,19 @@ class CoTDataset(Dataset):
     def __init__(
         self,
         features_npz: str,
+        csv_path: str,
         masks_npz: str,
         meta: np.ndarray | None = None,
         has_meta: np.ndarray | None = None,
     ):
         f = load_features(features_npz)
         m = load_subword_masks(masks_npz)
+        df = pd.read_csv(csv_path)
         assert f["features"].shape[0] == m["emotion"].shape[0], (
             f"row mismatch: feat={f['features'].shape[0]} masks={m['emotion'].shape[0]}"
+        )
+        assert len(df) == f["features"].shape[0], (
+            f"row mismatch: csv={len(df)} feat={f['features'].shape[0]}"
         )
         self.features = torch.from_numpy(f["features"])                         # float32
         self.attn     = torch.from_numpy(f["attention_mask"]).long()            # int
@@ -77,6 +82,9 @@ class CoTDataset(Dataset):
         self.em       = torch.from_numpy(m["emotion"])
         self.mo       = torch.from_numpy(m["modality"])
         self.ne       = torch.from_numpy(m["negation"])
+        self.texts    = df["statement"].astype(str).tolist() if "statement" in df.columns else df.index.astype(str).tolist()
+        label_col = "binary_label" if "binary_label" in df.columns else "label"
+        self.label_texts = df[label_col].astype(str).tolist() if label_col in df.columns else ["unknown"] * len(df)
         self.meta     = torch.from_numpy(meta).float() if meta is not None else None
         self.has_meta = (
             torch.from_numpy(has_meta).float() if has_meta is not None else None
@@ -93,8 +101,8 @@ class CoTDataset(Dataset):
         )
         if self.meta is not None:
             hm = self.has_meta[i] if self.has_meta is not None else torch.tensor(1.0)
-            return base + (self.meta[i], hm)
-        return base
+            return base + (self.meta[i], hm, self.texts[i], self.label_texts[i])
+        return base + (self.texts[i], self.label_texts[i])
 
 
 # ---------------------------------------------------------------------------
@@ -149,18 +157,18 @@ def gated_aux_loss(aux_logits, targets, mask, weight=None):
 # ---------------------------------------------------------------------------
 def _unpack(batch, use_meta, device):
     if use_meta:
-        feats, amask, em, mo, ne, y, meta, has_meta = batch
+        feats, amask, em, mo, ne, y, meta, has_meta = batch[:8]
         return (feats.to(device), amask.to(device),
                 em.to(device), mo.to(device), ne.to(device),
                 y.to(device), meta.to(device), has_meta.to(device))
-    feats, amask, em, mo, ne, y = batch
+    feats, amask, em, mo, ne, y = batch[:6]
     return (feats.to(device), amask.to(device),
             em.to(device), mo.to(device), ne.to(device),
             y.to(device), None, None)
 
 
 @torch.no_grad()
-def evaluate(model, loader, main_criterion, use_meta, device):
+def evaluate(model, loader, main_criterion, use_meta, device, decision_threshold: float | None = None):
     model.eval()
     losses, preds, ys, hms = [], [], [], []
     em_avg, mo_avg, ne_avg = [], [], []
@@ -169,7 +177,11 @@ def evaluate(model, loader, main_criterion, use_meta, device):
         out = model(feats, amask, em_m, mo_m, ne_m, meta, has_meta=has_meta)
         logits, em_s, mo_s, ne_s = out[0], out[1], out[2], out[3]
         losses.append(main_criterion(logits, y).item())
-        preds.append(logits.argmax(dim=-1).cpu().numpy())
+        if decision_threshold is None:
+            batch_preds = logits.argmax(dim=-1)
+        else:
+            batch_preds = (torch.softmax(logits, dim=-1)[:, 1] >= decision_threshold).long()
+        preds.append(batch_preds.cpu().numpy())
         ys.append(y.cpu().numpy())
         em_avg.append(em_s.mean().item())
         mo_avg.append(mo_s.mean().item())
@@ -189,6 +201,48 @@ def evaluate(model, loader, main_criterion, use_meta, device):
         "labels":   ys,
         "has_meta": has_meta_arr,
     }
+
+
+@torch.no_grad()
+def predict_with_threshold(model, loader, use_meta, device, threshold: float):
+    model.eval()
+    probs, ys = [], []
+    for batch in loader:
+        feats, amask, em_m, mo_m, ne_m, y, meta, has_meta = _unpack(batch, use_meta, device)
+        out = model(feats, amask, em_m, mo_m, ne_m, meta, has_meta=has_meta)
+        logits = out[0]
+        probs.append(torch.softmax(logits, dim=-1)[:, 1].cpu().numpy())
+        ys.append(y.cpu().numpy())
+    probs = np.concatenate(probs)
+    ys = np.concatenate(ys)
+    preds = (probs >= threshold).astype(np.int64)
+    return preds, ys
+
+
+@torch.no_grad()
+def find_best_threshold(model, loader, use_meta, device, grid_size: int = 99):
+    probs, ys = [], []
+    model.eval()
+    for batch in loader:
+        feats, amask, em_m, mo_m, ne_m, y, meta, has_meta = _unpack(batch, use_meta, device)
+        out = model(feats, amask, em_m, mo_m, ne_m, meta, has_meta=has_meta)
+        logits = out[0]
+        probs.append(torch.softmax(logits, dim=-1)[:, 1].cpu().numpy())
+        ys.append(y.cpu().numpy())
+    probs = np.concatenate(probs)
+    ys = np.concatenate(ys)
+
+    # Search a small grid so the calibration stays cheap and deterministic.
+    thresholds = np.linspace(0.05, 0.95, grid_size)
+    best_threshold = 0.5
+    best_f1 = -1.0
+    for threshold in thresholds:
+        preds = (probs >= threshold).astype(np.int64)
+        score = f1_score(ys, preds, average="macro")
+        if score > best_f1:
+            best_f1 = score
+            best_threshold = float(threshold)
+    return best_threshold, best_f1
 
 
 def per_domain_breakdown(preds, ys, has_meta_arr):
@@ -240,10 +294,17 @@ def main(
     seed: int = RANDOM_SEED,
     dataset: str = "liar",
     balance: bool = False,
+    calibrate_threshold: bool = True,
+    device_mode: str = "auto",
 ):
     torch.manual_seed(seed); np.random.seed(seed)
-    device = get_device()
-    print(f"\nPhase 4 training (dataset={dataset}, L={L}, meta={use_meta}, seed={seed}, device={device})")
+    device = get_device(device_mode)
+    print(
+        f"\n[device] requested={device_mode} resolved={device} "
+        f"torch={torch.__version__} cuda_available={torch.cuda.is_available()} "
+        f"cuda_version={torch.version.cuda or 'none'} mps_available={torch.backends.mps.is_available()}"
+    )
+    print(f"Phase 4 training (dataset={dataset}, L={L}, meta={use_meta}, seed={seed}, threshold_calibration={calibrate_threshold})")
 
     paths = _paths(L, dataset)
 
@@ -297,6 +358,7 @@ def main(
     def ds(split, meta, has):
         return CoTDataset(
             features_npz=paths[f"feat_{split}"],
+            csv_path=paths[f"csv_{split}"],
             masks_npz   =paths[f"mask_{split}"],
             meta=meta,
             has_meta=has,
@@ -333,11 +395,11 @@ def main(
                   f"Train buckets: {describe_buckets(train_has, train_ds.labels.numpy())}")
 
     if sampler is None:
-        train_loader = DataLoader(train_ds, batch_size=TRAIN_BATCH_SIZE, shuffle=True)
+        train_loader = DataLoader(train_ds, batch_size=TRAIN_BATCH_SIZE, shuffle=True, num_workers=0)
     else:
-        train_loader = DataLoader(train_ds, batch_size=TRAIN_BATCH_SIZE, sampler=sampler)
-    val_loader   = DataLoader(val_ds,   batch_size=TRAIN_BATCH_SIZE)
-    test_loader  = DataLoader(test_ds,  batch_size=TRAIN_BATCH_SIZE)
+        train_loader = DataLoader(train_ds, batch_size=TRAIN_BATCH_SIZE, sampler=sampler, num_workers=0)
+    val_loader   = DataLoader(val_ds,   batch_size=TRAIN_BATCH_SIZE, num_workers=0)
+    test_loader  = DataLoader(test_ds,  batch_size=TRAIN_BATCH_SIZE, num_workers=0)
 
     # ----- Model -----
     # When use_meta=True we pass meta_vocabs so CoTModel uses MetaEncoder
@@ -471,7 +533,13 @@ def main(
 
     # ----- Test -----
     model.load_state_dict(best_state)
-    test = evaluate(model, test_loader, main_criterion, use_meta, device)
+    threshold = 0.5
+    calibrated_val_f1 = None
+    if calibrate_threshold:
+        threshold, calibrated_val_f1 = find_best_threshold(model, val_loader, use_meta, device)
+        print(f"  calibrated decision threshold = {threshold:.2f} (val macro_f1={calibrated_val_f1:.4f})")
+
+    test = evaluate(model, test_loader, main_criterion, use_meta, device, decision_threshold=threshold)
     print("\nTEST RESULTS")
     print(f"  acc       = {test['acc']:.4f}")
     print(f"  macro_f1  = {test['macro_f1']:.4f}")
@@ -496,9 +564,19 @@ def main(
             logits, em_s, mo_s, ne_s = out[0], out[1], out[2], out[3]
             batch_rats = generate_batch_rationales(em_s, mo_s, ne_s, logits)
             out_path = os.path.join(rat_dir, f"sample_{tag}.txt")
-            with open(out_path, "w") as f:
-                for i, (rat, _, _) in enumerate(batch_rats[:10]):
-                    f.write(f"--- example {i+1} ---\n{rat}\n\n")
+            with open(out_path, "w", encoding="utf-8") as f:
+                if use_meta:
+                    texts = batch[8]
+                    actual_labels = batch[9]
+                else:
+                    texts = batch[6]
+                    actual_labels = batch[7]
+                for i, (rat, pred_label, pred_conf) in enumerate(batch_rats[:10]):
+                    f.write(f"--- example {i+1} ---\n")
+                    f.write(f"Input: {texts[i]}\n")
+                    f.write(f"Actual label: {actual_labels[i]}\n")
+                    f.write(f"Predicted label: {pred_label} ({pred_conf:.1f}%)\n")
+                    f.write(f"{rat}\n\n")
             break
     print(f"  sample rationales -> {out_path}")
 
@@ -510,6 +588,8 @@ def main(
         "use_meta": use_meta,
         "seed": seed,
         "best_val_macro_f1": best_f1,
+        "calibrated_threshold": threshold,
+        "calibrated_val_macro_f1": calibrated_val_f1,
         "test_acc": test["acc"],
         "test_macro_f1": test["macro_f1"],
         "test_per_domain": breakdown,
@@ -538,6 +618,17 @@ if __name__ == "__main__":
         help="Use domain-balanced sampler (LIAR/CoAID x fake/real). "
              "Recommended with --dataset merged.",
     )
+    p.add_argument(
+        "--no-calibrate-threshold", action="store_false", dest="calibrate_threshold",
+        help="Disable validation-based decision-threshold calibration and keep the original argmax behavior.",
+    )
+    p.add_argument(
+        "--device", choices=["auto", "cuda", "gpu", "mps", "cpu"], default="auto",
+        help="Select the runtime device. Use cuda/gpu to require a CUDA-enabled PyTorch build.",
+    )
+    p.set_defaults(calibrate_threshold=True)
     args = p.parse_args()
     main(L=args.L, use_meta=not args.no_meta, seed=args.seed,
-         dataset=args.dataset, balance=args.balance)
+         dataset=args.dataset, balance=args.balance,
+         calibrate_threshold=args.calibrate_threshold,
+         device_mode=args.device)
