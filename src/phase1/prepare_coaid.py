@@ -167,7 +167,10 @@ def load_coaid(coaid_dir: str) -> pd.DataFrame:
     return a long DataFrame with [statement, label, coaid_subset].
     """
     rows = []
-    files = sorted(glob.glob(os.path.join(coaid_dir, "*COVID-19.csv")))
+    files = sorted(
+        set(glob.glob(os.path.join(coaid_dir, "*COVID-19.csv"))) |
+        set(glob.glob(os.path.join(coaid_dir, "**", "*COVID-19.csv"), recursive=True))
+    )
     if not files:
         raise FileNotFoundError(
             f"No CoAID CSVs found under {coaid_dir}.\n"
